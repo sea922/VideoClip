@@ -7,7 +7,6 @@ A web-based video editing prototype for internal content creators. Paste a YouTu
 ## Quick Start
 
 ```bash
-cp .env.example .env
 docker compose up --build
 ```
 

@@ -130,16 +130,30 @@ async def process(req: ProcessRequest):
             )
 
             # 2. Extract clips
-            yield json.dumps({"progress": 5.0, "status": "Extracting clips"}) + "\n"
             clips_dicts = [{"start": c.start, "end": c.end} for c in req.clips]
-            clip_paths = await extract_clips(source_path, clips_dicts, tmp_dir)
+            clip_paths = []
+            
+            from services.clipper import extract_clip
+            for i, clip in enumerate(clips_dicts):
+                # Calculate progress: 5% up to 25% for extraction
+                pct = 5.0 + (i / len(clips_dicts)) * 20.0
+                yield json.dumps({"progress": pct, "status": f"Extracting clip {i+1}/{len(clips_dicts)}"}) + "\n"
+                
+                out = os.path.join(tmp_dir, f"clip_{i:03d}.mp4")
+                await extract_clip(
+                    source_path=source_path,
+                    start=float(clip["start"]),
+                    end=float(clip["end"]),
+                    output_path=out,
+                )
+                clip_paths.append(out)
 
             # 3. Merge
             try:
-                # Merge takes 5% to 95% of progress
+                # Merge takes 25% to 95% of progress
                 async for p in merge_clips(clip_paths, req.transition, output_path, tmp_dir):
                     if isinstance(p, float):
-                        mapped_progress = 5.0 + (p * 0.9)
+                        mapped_progress = 25.0 + (p * 0.7)
                         yield json.dumps({"progress": mapped_progress, "status": "Merging clips"}) + "\n"
             except TransitionNotSupportedError as e:
                 yield json.dumps({"error": str(e), "status_code": 422}) + "\n"

@@ -199,7 +199,8 @@ def _parse_ffmpeg_time(time_str: str) -> float:
 
 async def _run_ffmpeg(cmd: list[str], total_duration: float):
     """Run FFmpeg and yield progress %. Raises RuntimeError on failure."""
-    import re
+    # Ensure -progress pipe:1 is added before the output path
+    cmd = cmd[:-1] + ["-progress", "pipe:1"] + [cmd[-1]]
     
     proc = await asyncio.create_subprocess_exec(
         *cmd,
@@ -207,29 +208,31 @@ async def _run_ffmpeg(cmd: list[str], total_duration: float):
         stderr=asyncio.subprocess.PIPE,
     )
     
-    # ffmpeg progress output contains: time=00:00:10.50
-    time_pattern = re.compile(r'time=(\d{2}:\d{2}:\d{2}\.\d+)')
-    
-    full_stderr = []
+    # Read stderr in the background to capture errors
+    stderr_task = asyncio.create_task(proc.stderr.read())
     
     while True:
-        line = await proc.stderr.readline()
+        line = await proc.stdout.readline()
         if not line:
             break
             
-        decoded = line.decode('utf-8', errors='replace')
-        full_stderr.append(decoded)
-        
-        match = time_pattern.search(decoded)
-        if match and total_duration > 0:
-            current_time = _parse_ffmpeg_time(match.group(1))
-            pct = min((current_time / total_duration) * 100, 100.0)
-            yield pct
+        decoded = line.decode('utf-8', errors='replace').strip()
+        if decoded.startswith("out_time_us="):
+            val = decoded.split("=")[1]
+            try:
+                time_us = int(val)
+                if time_us > 0 and total_duration > 0:
+                    current_time = time_us / 1_000_000.0
+                    pct = min((current_time / total_duration) * 100, 100.0)
+                    yield pct
+            except ValueError:
+                pass
 
     await proc.wait()
+    stderr_bytes = await stderr_task
 
     if proc.returncode != 0:
-        stderr_text = "".join(full_stderr)[-500:]
+        stderr_text = stderr_bytes.decode('utf-8', errors='replace')[-500:]
         raise RuntimeError(
             f"FFmpeg failed (exit {proc.returncode}): {stderr_text}"
         )

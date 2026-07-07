@@ -54,6 +54,7 @@ export class ExportProcessor implements OnModuleInit {
 
     let finalResult: any = null;
     let lastProgressUpdate = 0;
+    let isUpdating = false;
 
     try {
       const response = await axios.post(
@@ -82,9 +83,12 @@ export class ExportProcessor implements OnModuleInit {
               const data = JSON.parse(line);
               if (data.progress !== undefined) {
                 const now = Date.now();
-                if (now - lastProgressUpdate > 250 || data.progress >= 100) {
-                  job.updateProgress(Math.round(data.progress)).catch(() => {});
+                if (!isUpdating && (now - lastProgressUpdate > 250 || data.progress >= 100)) {
+                  isUpdating = true;
                   lastProgressUpdate = now;
+                  job.updateProgress(Math.round(data.progress)).finally(() => {
+                    isUpdating = false;
+                  });
                 }
               } else if (data.result !== undefined) {
                 finalResult = data.result;

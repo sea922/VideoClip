@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { api, ApiError } from '../api/client';
+import { api, ApiError, JobState } from '../api/client';
 import { useJob } from '../hooks/useJob';
 import type { Clip } from '../hooks/useClips';
 import type { Transition } from './TransitionPicker';
@@ -21,7 +21,7 @@ export const ExportPanel: React.FC<Props> = ({ videoId, clips, transition }) => 
 
   // When job completes, fetch the export result for the presigned URL
   React.useEffect(() => {
-    if (job?.status === 'completed' && exportId) {
+    if (job?.status === JobState.COMPLETED && exportId) {
       api.getExport(exportId).then((result) => {
         if (result.presignedUrl) setPresignedUrl(result.presignedUrl);
       });
@@ -55,7 +55,7 @@ export const ExportPanel: React.FC<Props> = ({ videoId, clips, transition }) => 
   };
 
   const isProcessing =
-    jobId !== null && job?.status !== 'completed' && job?.status !== 'failed';
+    jobId !== null && job?.status !== JobState.COMPLETED && job?.status !== JobState.FAILED;
 
   const canExport = clips.length > 0 && !isProcessing && !isSubmitting;
 
@@ -98,7 +98,7 @@ export const ExportPanel: React.FC<Props> = ({ videoId, clips, transition }) => 
         </div>
       )}
 
-      {job?.status === 'failed' && (
+      {job?.status === JobState.FAILED && (
         <div className="status-error">
           ⚠️ Export failed: {job.error ?? 'Unknown error'}
         </div>

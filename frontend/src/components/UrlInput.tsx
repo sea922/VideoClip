@@ -1,9 +1,9 @@
-import React, { useState } from 'react';
-import { api, ApiError } from '../api/client';
+import React, { useState, useEffect } from 'react';
+import { api, ApiError, JobState } from '../api/client';
 import { useJob } from '../hooks/useJob';
 
 interface Props {
-  onVideoReady: (videoId: string) => void;
+  onVideoReady: (videoId: string, s3Key: string, duration: number) => void;
 }
 
 function isYouTubeUrl(url: string): boolean {
@@ -21,9 +21,11 @@ export const UrlInput: React.FC<Props> = ({ onVideoReady }) => {
   const { job } = useJob(jobId);
 
   // Watch for job completion
-  React.useEffect(() => {
-    if (job?.status === 'completed' && videoId) {
-      onVideoReady(videoId);
+  useEffect(() => {
+    if (job?.status === JobState.COMPLETED && videoId) {
+      api.getVideo(videoId).then(meta => {
+        onVideoReady(meta.videoId, meta.s3Key, meta.duration);
+      });
     }
   }, [job?.status, videoId, onVideoReady]);
 
@@ -56,7 +58,7 @@ export const UrlInput: React.FC<Props> = ({ onVideoReady }) => {
     }
   };
 
-  const isProcessing = jobId !== null && job?.status !== 'completed' && job?.status !== 'failed';
+  const isProcessing = jobId !== null && job?.status !== JobState.COMPLETED && job?.status !== JobState.FAILED;
 
   return (
     <div className="url-input-container">
@@ -101,7 +103,7 @@ export const UrlInput: React.FC<Props> = ({ onVideoReady }) => {
         <div className="download-status">
           <div className="spinner" />
           <div className="status-text">
-            <span>Downloading video…</span>
+            <span>{job?.status === JobState.WAITING ? 'Queued...' : 'Downloading video…'}</span>
             {job?.progress ? (
               <span className="progress-label">{job.progress}%</span>
             ) : null}
@@ -115,7 +117,7 @@ export const UrlInput: React.FC<Props> = ({ onVideoReady }) => {
         </div>
       )}
 
-      {job?.status === 'failed' && (
+      {job?.status === JobState.FAILED && (
         <div className="status-error">
           <span>⚠️ Download failed: {job.error ?? 'Unknown error'}</span>
           <button

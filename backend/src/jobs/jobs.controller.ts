@@ -1,5 +1,6 @@
 import { Controller, Get, Param, Sse, MessageEvent } from '@nestjs/common';
 import { JobsService, JobStatus } from './jobs.service';
+import { JobState } from './jobs.enum';
 import { Observable, interval, from } from 'rxjs';
 import { map, switchMap, takeWhile, distinctUntilChanged } from 'rxjs/operators';
 
@@ -19,7 +20,7 @@ export class JobsController {
       distinctUntilChanged((prev, curr) => 
         prev.status === curr.status && prev.progress === curr.progress
       ),
-      takeWhile((job) => job.status !== 'completed' && job.status !== 'failed', true),
+      takeWhile((job) => job.status !== JobState.COMPLETED && job.status !== JobState.FAILED, true),
       map((job) => ({
         data: job,
       } as MessageEvent)),

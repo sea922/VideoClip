@@ -88,6 +88,9 @@ async def _run_ytdlp(url: str, output_path: str):
     # yt-dlp progress looks like: [download]   5.0% of ...
     progress_pattern = re.compile(r'\[download\]\s+(\d+\.\d+)%')
     
+    current_stream = 0
+    last_pct = 0.0
+    
     while True:
         line = await proc.stdout.readline()
         if not line:
@@ -98,7 +101,22 @@ async def _run_ytdlp(url: str, output_path: str):
         if match:
             try:
                 pct = float(match.group(1))
-                yield pct
+                
+                # Detect stream change (e.g., video finishes at 100%, audio starts at 0%)
+                if pct < last_pct and (last_pct - pct) > 50.0:
+                    current_stream += 1
+                
+                last_pct = pct
+                
+                if current_stream == 0:
+                    # First stream (usually video) takes 0 -> 80%
+                    yield pct * 0.8
+                elif current_stream == 1:
+                    # Second stream (usually audio) takes 80 -> 95%
+                    yield 80.0 + (pct * 0.15)
+                else:
+                    # Any further streams max out at 95%
+                    yield 95.0
             except ValueError:
                 pass
 

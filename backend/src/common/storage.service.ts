@@ -22,6 +22,8 @@ export class StorageService {
         secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY ?? '',
       },
       forcePathStyle: true, // Required for MinIO
+      requestChecksumCalculation: "WHEN_REQUIRED" as const,
+      responseChecksumValidation: "WHEN_REQUIRED" as const,
     };
 
     // Client for internal backend usage (uploading/downloading directly)

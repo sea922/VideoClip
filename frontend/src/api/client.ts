@@ -43,9 +43,20 @@ export interface VideoMetadata {
   thumbnailUrl: string;
 }
 
+export const JobState = {
+  WAITING: 'waiting',
+  ACTIVE: 'active',
+  COMPLETED: 'completed',
+  FAILED: 'failed',
+  DELAYED: 'delayed',
+  UNKNOWN: 'unknown',
+} as const;
+
+export type JobState = typeof JobState[keyof typeof JobState];
+
 export interface JobStatus {
   id: string;
-  status: 'waiting' | 'active' | 'completed' | 'failed' | 'delayed' | 'unknown';
+  status: JobState;
   progress: number;
   error?: string;
 }

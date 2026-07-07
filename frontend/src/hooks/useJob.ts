@@ -1,8 +1,8 @@
 import { useState, useEffect } from 'react';
 import type { JobStatus } from '../api/client';
-import { BASE_URL } from '../api/client';
+import { JobState, BASE_URL } from '../api/client';
 
-const TERMINAL_STATES = new Set(['completed', 'failed']);
+const TERMINAL_STATES = new Set<JobState>([JobState.COMPLETED, JobState.FAILED]);
 
 /**
  * Connects to /jobs/:jobId/progress SSE stream until the job reaches a terminal state.

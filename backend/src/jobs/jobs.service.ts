@@ -1,9 +1,10 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { Queue, Job } from 'bullmq';
+import { JobState } from './jobs.enum';
 
 export interface JobStatus {
   id: string;
-  status: 'waiting' | 'active' | 'completed' | 'failed' | 'delayed' | 'unknown';
+  status: JobState;
   progress: number;
   error?: string;
   returnValue?: unknown;
