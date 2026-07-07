@@ -1,100 +1,166 @@
 # Design Decisions & Evaluation Write-up
 
-This document explains the technical reasoning, tradeoffs, and product decisions made while building this Video Editor Mini App. 
+This document provides a summary of the implementation, design decisions, and scaling considerations for the Video Editor Mini App case study.
 
 ---
 
-## 1. System Design: Breaking Down the Problem
+## 1. System Design: How Did I Break Down the Problem?
 
-**How did you break down the problem? What tradeoffs did you make?**
+### The Core Problem
 
-The problem requires a web interface for users to select video clips, combined with heavy background processing to download videos and run FFmpeg.
+The request is deceptively simple: "paste a YouTube URL, clip it, download it." But the moment you add the constraint of 0.5 vCPU and 1 GB of shared RAM, it becomes a resource orchestration problem. You can't run FFmpeg inside a Node.js web server — it'll block the event loop, memory limits will be uncontrollable, and the UX will feel broken. So the first design decision was: **separate the I/O-bound API from the CPU-bound processing work.**
 
-**The Breakdown:**
-- **Frontend (React/Vite)**: A lightweight, responsive SPA for video playback and clip selection. It communicates via REST and subscribes to Server-Sent Events (SSE) for real-time progress.
-- **Backend (NestJS)**: Acts as an API gateway, orchestrating jobs and managing the state. It handles the API routes and pushes SSE updates, keeping the Node.js event loop free from heavy lifting.
-- **Worker (Python FastAPI)**: Handles the CPU-intensive tasks (yt-dlp, FFmpeg). Python was chosen due to its robust ecosystem around video processing and subprocess management.
-- **Message Broker (BullMQ + Redis)**: Decouples the fast backend from the slow worker. Redis stores job states and transient video metadata.
-- **Object Storage (MinIO)**: Simulates AWS S3 locally. Since Fargate is ephemeral, persistent storage is delegated to S3.
+### How I Broke It Down
 
-**Tradeoffs:**
-- **Microservices vs. Monolith**: Splitting the Node.js backend and Python worker adds operational complexity (more containers, message broker) but was necessary. Running FFmpeg in Node.js would block the event loop and make resource accounting impossible.
-- **MinIO/S3 vs. Local Volume**: Writing to `/tmp` and immediately uploading to S3 adds latency and network overhead compared to a shared Docker volume. However, it ensures the architecture is fully stateless and ready for AWS ECS Fargate, where containers scale independently and don't share disks.
+| Layer | Responsibility | Technology |
+|---|---|---|
+| **Frontend** | User interaction, clip selection, progress display | React + Vite (TypeScript) |
+| **Backend** | REST API, job orchestration, SSE push | NestJS (TypeScript) |
+| **Worker** | Video download (yt-dlp), clip + merge (FFmpeg) | Python + FastAPI |
+| **Message Broker** | Decouples API from worker; stores job state | BullMQ on Redis |
+| **Object Storage** | Persistent stateless file storage | MinIO (local) / S3 (prod) |
 
----
+The key insight: **NestJS never touches a video byte.** Its only job is to enqueue work, stream job status back to the browser, and serve pre-signed URLs. All heavy compute is isolated inside the Python worker container.
 
-## 2. Resource Management
+### Tradeoffs I Made
 
-**How does your system behave under the memory/CPU constraint (0.5 vCPU, 1GB RAM)? What would break first, and how did you design around it?**
-
-The strict constraint forces us to limit concurrency and memory footprint.
-- **CPU Constraint (0.5 vCPU)**: FFmpeg is heavily multi-threaded by default and will consume all available CPU. I explicitly added `-threads 1` to all FFmpeg commands. This ensures it doesn't starve the FastAPI health checks or cause ECS to throttle the container.
-- **RAM Constraint (1GB)**: Downloading massive 4K videos would overwhelm the disk and memory. I configured `yt-dlp` with `--format "bestvideo[height<=480]+bestaudio"` and `--max-filesize 500m`. We never load video chunks into memory; everything is streamed to `/tmp`, processed, and then streamed to S3.
-
-**What would break first?** 
-The Worker. With `concurrency: 1` configured in BullMQ, the worker can only process one video at a time to prevent OOM errors. Under load, the queue depth will spike, and users will experience long wait times.
-
-**Design Around It:** 
-The backend actively monitors the queue depth (`getWaitingCount()`). If the queue exceeds 10 jobs, the API returns an `HTTP 429 Too Many Requests`. This implements backpressure, protecting the system from cascading failure at the cost of rejecting new work.
+| Decision | Chosen | Rejected | Reason |
+|---|---|---|---|
+| Worker language | Python | Node.js FFmpeg wrapper | Python's subprocess + asyncio ecosystem for media tools is superior |
+| File storage | S3/MinIO (pre-signed URLs) | Shared Docker volume | Fargate containers have no shared disk; this architecture requires zero changes to move to real S3 |
+| Progress delivery | SSE | WebSockets, polling | SSE is unidirectional (perfect for this), lower overhead, and works over plain HTTP/1.1 |
+| State store | Redis (BullMQ native) | PostgreSQL | No user accounts, no complex queries — Redis already paid for; Postgres would cost ~100 MB RAM for zero benefit |
+| Concurrency model | 1 FFmpeg job at a time | Parallel jobs | OOM risk under the 1 GB total budget; predictability beats throughput at this scale |
 
 ---
 
-## 3. Code Quality
+## 2. Resource Management: Staying Inside 0.5 vCPU / 1 GB RAM
 
-**Is the code readable, structured, and maintainable?**
+### Memory Budget
 
-- **Type Safety**: The entire stack (Frontend + NestJS) uses strict TypeScript. Data contracts (like `ExportRequest` and `JobState`) are strongly typed, preventing runtime integration errors.
-- **Modular Structure**: The NestJS backend is divided into logical feature modules (`VideosModule`, `ExportsModule`, `JobsModule`). Each module isolates its controllers, services, and DTOs.
-- **Clean Interfaces**: The Python worker communicates strictly via BullMQ payloads and S3 object keys. There is no tight coupling or shared database schema between the Node.js and Python worlds.
-- **Error Handling**: Standardized HTTP exception filters in NestJS, and robust `try/finally` blocks in Python to guarantee `/tmp` file cleanup even if FFmpeg crashes.
+| Service | RAM limit | CPU limit | Rationale |
+|---|---|---|---|
+| worker | 600 MB | 0.35 vCPU | FFmpeg + yt-dlp peak during processing |
+| backend | 256 MB | 0.10 vCPU | Node.js event loop — mostly I/O, low RSS |
+| redis | 64 MB | 0.02 vCPU | Metadata + job queue, capped with `maxmemory` policy |
+| minio | 80 MB | 0.02 vCPU | Lightweight local S3; not present in real AWS deployments |
+| **Total** | **~1000 MB** | **~0.49 vCPU** | ✅ Within constraint |
 
----
+### What Would Break First — And How I Designed Around It
 
-## 4. Product Sense
+**The bottleneck is the Worker.**
 
-**Does the result actually work as a user experience?**
+FFmpeg, by default, spawns threads equal to CPU core count. On a 0.35 vCPU Fargate slice that number is unpredictable and will saturate available CPU, causing process throttling and audio/video desync. I applied:
 
-Yes. The interface focuses on hiding the complexity of video processing:
-- **Real-time Feedback**: Instead of polling, Server-Sent Events (SSE) push live percentage updates from FFmpeg straight to the React UI.
-- **Optimistic UI**: The editor allows the user to start creating clips immediately while the video is still downloading in the background.
-- **History Tracking**: Users have a dedicated History tab to view past tasks, review previously downloaded videos, and download finalized exports without re-processing.
-- **State Persistence**: By persisting job IDs and states in Redis, users can refresh the page and their exports will continue seamlessly.
+- **`-threads 1`** on every FFmpeg invocation — deterministic single-core encoding.
+- **`--format "bestvideo[height<=480]+bestaudio"`** on yt-dlp — caps download size to ~200 MB/video.
+- **`--max-filesize 500m`** — hard limit to prevent runaway downloads.
+- **`concurrency: 1` in BullMQ** (default via `MAX_CONCURRENT_JOBS` env var) — only one job per processor runs at a time, preventing memory spikes from parallel FFmpeg processes writing to `/tmp`. This can be raised to 2–3 if the worker RAM limit is increased.
 
----
+**Backpressure mechanism:** Before accepting any new job, the NestJS backend calls `queue.getWaitingCount()`. If the queue depth reaches 10, it returns `HTTP 429 Too Many Requests`. This protects the system from cascading failure: the queue never becomes unbounded, Redis never runs out of memory, and the user gets a clear actionable error instead of a silent timeout.
 
-## 5. Engineering Judgment
-
-**What did you choose not to build, and why?**
-
-- **No PostgreSQL/Relational Database**: I opted to use Redis (which was already required for BullMQ) as our primary data store using `HSET` with a 2-hour TTL. Since there are no user accounts, no long-term project saving, and all queries are simple key-value lookups, adding Postgres would have cost ~100MB of our precious 1GB RAM budget for zero tangible benefit.
-- **No Complex Video Editor**: I didn't build a timeline with drag-and-drop waveforms. Instead, I built a functional list of clips with simple range sliders. This delivers the core value (clipping and merging) without getting bogged down in weeks of canvas/WebGL UI development.
-- **No Websockets**: I used Server-Sent Events (SSE) instead of WebSockets. SSE is strictly unidirectional (Server -> Client), which perfectly maps to our use case of streaming progress updates, requires less overhead, and is natively supported over standard HTTP/1.1.
+**File cleanup:** Every `/tmp` file created during download or export is wrapped in a `try/finally` block. Even if FFmpeg crashes mid-encode, the temp files are deleted immediately after the S3 upload completes. This prevents disk exhaustion, which would otherwise bring down the entire container.
 
 ---
 
-## 6. OPEN QUESTION — SCALING
+## 3. Code Quality: Readability, Structure, Maintainability
 
-**If 1,000 users submitted videos simultaneously, what would break first in your system — and how would you fix it?**
+### Architecture
 
-### What breaks first:
-The Python Worker container. Currently, to stay within the 1GB RAM limit, the BullMQ worker is configured to process exactly one job at a time (`concurrency: 1`). If 1,000 users submit jobs simultaneously, the queue will instantly spike to 1,000. 
-- The backend will start rejecting requests (due to our 429 backpressure).
-- Jobs at the back of the queue would take hours to process.
-- The Redis instance holding the queue might experience memory pressure if job payloads are large.
+The NestJS backend uses the official **Module / Controller / Service / DTO** pattern:
+- `VideosModule` — handles YouTube URL submission and video metadata.
+- `ExportsModule` — handles clip-merge job submission and result retrieval.
+- `JobsModule` — provides the SSE stream and a unified history view across both queues.
 
-### How I would fix it (in order of implementation):
+No cross-module coupling: each module only imports what it explicitly needs. The `RedisService` and `StorageService` are shared infrastructure, injected as NestJS providers — not global singletons.
 
-1. **Horizontal Scaling (Immediate Fix)**
-   - BullMQ supports multiple consumers out-of-the-box. I would configure AWS ECS to use an Auto Scaling Group for the worker task.
-   - We scale from 1 worker to 50 workers. Because we rely on S3 for state, workers are completely stateless and can process jobs in parallel with zero code changes.
+### Type Safety End-to-End
 
-2. **Split the Queues (Mid-term Fix)**
-   - Downloading a video takes ~10 seconds, but merging with FFmpeg takes ~60 seconds. 
-   - I would split `downloadQueue` and `exportQueue` into separate worker pools. This prevents fast download jobs from getting stuck behind slow export jobs.
+`JobState` is defined as the shared contract between the backend and frontend, with no loose string literals anywhere in the codebase. The backend uses a TypeScript `enum`; the frontend mirrors it as a `const` object + `type` to satisfy `verbatimModuleSyntax` (which forbids `enum` in `.tsx` files):
 
-3. **Client-Side Uploads / Caching (Long-term Fix)**
-   - Instead of our server downloading the YouTube video, I would hash the YouTube URL. If another user has already requested it, we instantly serve the S3 link.
-   - For custom videos, we would use S3 Pre-Signed Upload URLs so the client uploads bytes directly to S3, bypassing our infrastructure entirely and saving massive amounts of bandwidth and compute.
+```typescript
+// backend/src/jobs/jobs.enum.ts
+export enum JobState {
+  WAITING = 'waiting', ACTIVE = 'active', COMPLETED = 'completed',
+  FAILED = 'failed', DELAYED = 'delayed', UNKNOWN = 'unknown'
+}
 
-4. **Swap Redis for AWS SQS**
-   - For true enterprise scale, I would replace BullMQ/Redis with AWS SQS. SQS is fully managed, infinitely scalable, and ties directly into ECS target tracking scaling policies based on queue depth.
+// frontend/src/api/client.ts
+export const JobState = { WAITING: 'waiting', ACTIVE: 'active', ... } as const;
+export type JobState = typeof JobState[keyof typeof JobState];
+```
+
+The values are identical strings — the compiler enforces the contract on both sides.
+
+### Testing
+
+Unit tests cover `VideosService` and `VideosController` — the primary user-facing path — with fully mocked BullMQ queues and Redis providers. Each test verifies both the happy path and error conditions (queue overflow → 429, missing Redis key → 404). `ExportsService` tests are a known gap; the export flow is covered by integration testing manually, and a spec file would be the next addition.
+
+### Error Handling
+
+- NestJS: `@nestjs/common` exception classes (`NotFoundException`, `HttpException`) bubble up through Nest's exception filter layer with consistent JSON error shapes.
+- Python Worker: All FFmpeg subprocess calls are wrapped in `try/except`, progress errors are logged, and temp files are cleaned via `finally`.
+
+---
+
+## 4. Product Sense: Does It Actually Work as a User Experience?
+
+Yes. I focused on making the processing complexity invisible to the user.
+
+**Real-time progress, not spinners.** Instead of a loading spinner that gives no information, the frontend subscribes to a Server-Sent Events stream. FFmpeg outputs progress via `pipe:1`, the worker parses it, and each BullMQ `job.updateProgress()` call instantly pushes a percentage to the browser. The user sees the progress bar move from 0% to 100% with no polling.
+
+**Download-first flow with live progress feedback.** After submitting a YouTube URL, the user remains on Step 1 and sees a live progress bar driven by real `yt-dlp` download percentage — not a spinner. The editor only unlocks once the download completes and video metadata (duration, S3 key) is available. This is a deliberate choice: the clip editor requires a known video duration to initialize the range sliders correctly, so there is nothing meaningful to show until the download is done. The tradeoff is a forced wait, which is acceptable because the progress bar makes the wait feel transparent and bounded rather than broken.
+
+**History and recovery.** A dedicated **History tab** lists all past download and export jobs. From there, users can:
+- **Review** a completed download — reloads the video back into the editor.
+- **Download** a completed export — fetches a fresh pre-signed S3 URL and opens the file.
+
+If a user refreshes the page mid-export, the job continues in the worker. They can find it in History and download the result when it completes — no data is lost.
+
+**Honest error states.** If yt-dlp fails (403 from YouTube bot detection, geo-restriction, file too large), the error message is surfaced directly in the history and the SSE stream. The user knows what happened and why.
+
+---
+
+## 5. Engineering Judgment: What I Chose Not to Build
+
+**No PostgreSQL.** Redis is already required for BullMQ. Every data access pattern in this app is a point lookup (`video:{id}`, `export:{id}`). Adding PostgreSQL would cost ~100 MB RAM — 10% of the total budget — for no functional gain at this scope. I have abstracted the data access layer (`RedisService`) so it could be swapped for a DB-backed service in one file if requirements grow.
+
+**No drag-and-drop timeline editor.** I built a functional range-slider clip selector instead. A canvas-based waveform timeline is a multi-week UI project that would have consumed all implementation time without adding more capability for this use case: selecting start/end times for multiple clips. The sliders deliver the same result.
+
+**No WebSockets.** SSE handles the one use case (server-to-client progress) with less code and less overhead. WebSockets are bidirectional — that complexity is only justified when the client needs to push real-time data back to the server.
+
+**No authentication.** Out of scope for this prototype. The architecture supports adding JWT-based auth in a single NestJS middleware layer if needed — no architectural changes required.
+
+**No CDN / transcoding pipeline.** Pre-signed URL delivery from S3 is sufficient for a single-session download. A CDN (CloudFront) and multi-resolution HLS transcode would make sense for a multi-user streaming product, not a personal download tool.
+
+---
+
+## 6. Open Question — Scaling: 1,000 Simultaneous Users
+
+**What breaks first:** The Python Worker, and more specifically, the queue in Redis.
+
+The worker processes one job at a time. At 1,000 simultaneous submissions, the queue instantly holds 1,000 jobs. With each job averaging 60 seconds of FFmpeg work, the last user in queue waits **16+ hours**. Meanwhile, Redis's `allkeys-lru` eviction policy will start dropping older jobs from the queue to stay under 60 MB, silently losing work.
+
+### Fix It — Ordered by Implementation Cost
+
+**1. Horizontal Worker Scaling (Day 1, zero code changes)**
+
+BullMQ is a multi-consumer queue. Deploy 20 worker containers on ECS. Each independently claims and processes jobs in parallel. Set up an ECS Auto Scaling policy on the `ApproximateNumberOfMessagesVisible` CloudWatch metric (or BullMQ's `getWaitingCount`): scale out when queue > 5, scale in when queue = 0.
+
+**2. Queue Separation (Day 2)**
+
+Download jobs (~10s each) and export/merge jobs (~60s each) should live on separate queues with independent worker pools. Otherwise, 1,000 pending FFmpeg merges starve incoming download requests. Separate queues also allow independent scaling policies: more download workers, fewer merge workers.
+
+**3. URL-Based Caching for Downloads (Week 1)**
+
+Many of the 1,000 users will submit the same YouTube video. Hash the URL and store the resulting S3 key in Redis. On cache hit, skip the yt-dlp download entirely — return the existing S3 key and proceed directly to the editor. This cuts download queue depth dramatically for popular videos.
+
+**4. Redis → ElastiCache (Clustered)**
+
+A single Redis instance is a single point of failure and has a memory ceiling. Replace it with AWS ElastiCache (clustered mode) with replication. BullMQ supports Redis Cluster. This provides HA and eliminates the 60 MB memory cap that would cause silent job loss.
+
+**5. Replace BullMQ → SQS + Lambda (Long-term)**
+
+For true elastic scale without managing worker fleets, replace BullMQ with SQS and trigger ECS Fargate Spot tasks (or Lambda for short jobs) per message. SQS is fully managed, infinitely scalable, and has at-least-once delivery guarantees. The NestJS backend still enqueues messages; the worker logic stays unchanged — only the transport layer changes.
+
+**The honest summary:** The current architecture is correct for the constraint given (0.5 vCPU / 1 GB). It would break at scale in a well-understood and recoverable way. The path from here to 1,000 users is additive infrastructure — not a rewrite.
