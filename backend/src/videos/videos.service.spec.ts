@@ -68,7 +68,8 @@ describe('VideosService', () => {
       expect(downloadQueue.getWaitingCount).toHaveBeenCalled();
       expect(downloadQueue.add).toHaveBeenCalledWith(
         'download',
-        expect.objectContaining({ url: dto.url, videoId: expect.any(String) })
+        expect.objectContaining({ url: dto.url, videoId: expect.any(String) }),
+        expect.objectContaining({ jobId: expect.any(String) })
       );
       expect(result).toHaveProperty('videoId');
       expect(result.jobId).toBe('job-id-123');
