@@ -7,13 +7,13 @@ A web-based video editing prototype for internal content creators. Paste a YouTu
 ## Quick Start
 
 ```bash
-docker compose up --build
+cd docker && docker compose up --build
 ```
 
 Open [http://localhost:5173](http://localhost:5173)
 
 MinIO console (inspect files): [http://localhost:9001](http://localhost:9001) — login: `minioadmin / minioadmin`
-
+# docker compose down && docker compose up -d --build
 ---
 
 ## Architecture

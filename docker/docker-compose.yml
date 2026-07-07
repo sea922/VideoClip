@@ -4,12 +4,12 @@ services:
   # ─────────────────────────────────────────────
   frontend:
     build:
-      context: ./frontend
-      dockerfile: Dockerfile
+      context: ../frontend
+      dockerfile: ../docker/frontend.Dockerfile
       args:
         - VITE_API_URL=${VITE_API_URL:-http://localhost:3000}
     env_file:
-      - ./frontend/.env
+      - ../frontend/.env
     ports:
       - "5173:80"
     depends_on:
@@ -27,12 +27,12 @@ services:
   # ─────────────────────────────────────────────
   backend:
     build:
-      context: ./backend
-      dockerfile: Dockerfile
+      context: ../backend
+      dockerfile: ../docker/backend.Dockerfile
     ports:
       - "3000:3000"
     env_file:
-      - ./backend/.env
+      - ../backend/.env
     depends_on:
       redis:
         condition: service_healthy
@@ -51,12 +51,12 @@ services:
   # ─────────────────────────────────────────────
   worker:
     build:
-      context: ./worker
-      dockerfile: Dockerfile
+      context: ../worker
+      dockerfile: ../docker/worker.Dockerfile
     ports:
       - "8000:8000"
     env_file:
-      - ./worker/.env
+      - ../worker/.env
     depends_on:
       minio:
         condition: service_healthy
@@ -75,7 +75,9 @@ services:
     image: redis:7-alpine
     ports:
       - "6379:6379"
-    command: redis-server --maxmemory 60mb --maxmemory-policy allkeys-lru
+    command: redis-server --maxmemory 60mb --maxmemory-policy allkeys-lru --save 60 1
+    volumes:
+      - redis-data:/data
     networks:
       - app-network
     healthcheck:
@@ -100,7 +102,7 @@ services:
       - "9000:9000"
       - "9001:9001"
     env_file:
-      - ./minio.env
+      - minio.env
     volumes:
       - minio-data:/data
     networks:
@@ -150,4 +152,6 @@ networks:
 
 volumes:
   minio-data:
+    driver: local
+  redis-data:
     driver: local

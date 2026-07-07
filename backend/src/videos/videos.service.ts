@@ -5,7 +5,7 @@ import {
   HttpStatus,
 } from '@nestjs/common';
 import { Queue } from 'bullmq';
-import { v4 as uuidv4 } from 'uuid';
+import * as crypto from 'crypto';
 import { Inject } from '@nestjs/common';
 import { RedisService } from '../common/redis.service';
 import { StorageService } from '../common/storage.service';
@@ -31,11 +31,11 @@ export class VideosService {
       );
     }
 
-    const videoId = uuidv4();
+    const videoId = crypto.randomUUID();
     const job = await this.downloadQueue.add('download', {
       videoId,
       url: dto.url,
-    });
+    }, { jobId: videoId });
 
     return { videoId, jobId: job.id! };
   }

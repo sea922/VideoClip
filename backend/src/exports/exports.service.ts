@@ -6,7 +6,7 @@ import {
   Inject,
 } from '@nestjs/common';
 import { Queue } from 'bullmq';
-import { v4 as uuidv4 } from 'uuid';
+import * as crypto from 'crypto';
 import { RedisService } from '../common/redis.service';
 import { CreateExportDto } from './dto/create-export.dto';
 
@@ -31,13 +31,13 @@ export class ExportsService {
       );
     }
 
-    const exportId = uuidv4();
+    const exportId = crypto.randomUUID();
     const job = await this.exportQueue.add('export', {
       exportId,
       videoId: dto.videoId,
       clips: dto.clips,
       transition: dto.transition,
-    });
+    }, { jobId: exportId });
 
     // Store initial status in Redis
     await this.redisService.hset(`export:${exportId}`, {
