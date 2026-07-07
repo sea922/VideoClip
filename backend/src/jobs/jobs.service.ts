@@ -61,4 +61,39 @@ export class JobsService {
   getExportQueue(): Queue {
     return this.exportQueue;
   }
+
+  async getAllJobs(): Promise<any[]> {
+    const types = [
+      JobState.COMPLETED,
+      JobState.FAILED,
+      JobState.ACTIVE,
+      JobState.WAITING,
+      JobState.DELAYED,
+    ] as any;
+    const downloadJobs = await this.downloadQueue.getJobs(types);
+    const exportJobs = await this.exportQueue.getJobs(types);
+
+    const mapJob = async (job: Job, type: 'download' | 'export') => {
+      const state = await job.getState();
+      const progress = typeof job.progress === 'number' ? job.progress : 0;
+      return {
+        id: job.id,
+        type,
+        status: state,
+        progress,
+        createdAt: job.timestamp,
+        data: job.data,
+        error: job.failedReason,
+        returnValue: job.returnvalue,
+      };
+    };
+
+    const mappedDownloads = await Promise.all(downloadJobs.map(j => mapJob(j, 'download')));
+    const mappedExports = await Promise.all(exportJobs.map(j => mapJob(j, 'export')));
+
+    const allJobs = [...mappedDownloads, ...mappedExports];
+    allJobs.sort((a, b) => b.createdAt - a.createdAt); // newest first
+
+    return allJobs;
+  }
 }

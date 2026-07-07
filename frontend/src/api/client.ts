@@ -78,6 +78,17 @@ export interface ExportResult {
   presignedUrl?: string;
 }
 
+export interface HistoryJob {
+  id: string;
+  type: 'download' | 'export';
+  status: JobState;
+  progress: number;
+  createdAt: number;
+  data: any;
+  error?: string;
+  returnValue?: any;
+}
+
 // ── API functions ────────────────────────────────────────────
 
 export const api = {
@@ -104,4 +115,7 @@ export const api = {
 
   getExport: (exportId: string): Promise<ExportResult> =>
     request(`/exports/${exportId}`),
+
+  getAllJobs: (): Promise<HistoryJob[]> =>
+    request('/jobs'),
 };

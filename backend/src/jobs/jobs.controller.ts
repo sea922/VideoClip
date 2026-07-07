@@ -8,6 +8,11 @@ import { map, switchMap, takeWhile, distinctUntilChanged } from 'rxjs/operators'
 export class JobsController {
   constructor(private readonly jobsService: JobsService) {}
 
+  @Get()
+  getAllJobs() {
+    return this.jobsService.getAllJobs();
+  }
+
   @Get(':id')
   getJob(@Param('id') id: string): Promise<JobStatus> {
     return this.jobsService.getJob(id);
